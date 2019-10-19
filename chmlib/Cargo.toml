@@ -3,7 +3,10 @@ name = "chmlib"
 version = "0.1.0"
 authors = ["Michael Bryan <michaelfbryan@gmail.com>"]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "A library for reading Microsoft HTML Help Files (.chm)"
+license = "LGPL"
+repository = "https://github.com/Michael-F-Bryan/chmlib"
 
 [dependencies]
+chmlib-sys = { path = "../chmlib-sys" }
+thiserror = "1.0.2"

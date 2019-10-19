@@ -3,6 +3,7 @@ use std::{
     fmt::{self, Debug, Formatter},
     mem::{ManuallyDrop, MaybeUninit},
     os::raw::{c_int, c_void},
+    panic,
     path::Path,
     ptr::NonNull,
 };
@@ -51,6 +52,7 @@ impl ChmFile {
         }
     }
 
+    /// Inspect each item within the [`ChmFile`].
     pub fn for_each<F>(&mut self, filter: Filter, mut cb: F)
     where
         F: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
@@ -65,16 +67,17 @@ impl ChmFile {
         }
     }
 
+    /// Inspect each item within the [`ChmFile`] inside a specified directory.
     pub fn for_each_item_in_dir<F, P>(
         &mut self,
         filter: Filter,
-        path: P,
+        prefix: P,
         mut cb: F,
     ) where
         P: AsRef<Path>,
         F: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
     {
-        let path = match path_to_cstring(path.as_ref()) {
+        let path = match path_to_cstring(prefix.as_ref()) {
             Ok(p) => p,
             Err(_) => return,
         };
@@ -91,26 +94,35 @@ impl ChmFile {
     }
 }
 
-unsafe extern "C" fn function_wrapper<W>(
+unsafe extern "C" fn function_wrapper<F>(
     file: *mut chmlib_sys::chmFile,
     unit: *mut chmlib_sys::chmUnitInfo,
     state: *mut c_void,
 ) -> c_int
 where
-    W: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
+    F: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
 {
-    // Use ManuallyDrop because we want to give the caller a `&mut ChmFile` but
-    // want to make sure the destructor is never called (to prevent
-    // double-frees).
-    let mut file = ManuallyDrop::new(ChmFile {
-        raw: NonNull::new_unchecked(file),
+    // we need to make sure panics can't escape across the FFI boundary.
+    let result = panic::catch_unwind(|| {
+        // Use ManuallyDrop because we want to give the caller a `&mut ChmFile`
+        // but want to make sure the destructor is never called (to
+        // prevent double-frees).
+        let mut file = ManuallyDrop::new(ChmFile {
+            raw: NonNull::new_unchecked(file),
+        });
+        let unit = UnitInfo::from_raw(unit.read());
+        // the opaque state pointer is guaranteed to point to an instance of our
+        // closure
+        let closure = &mut *(state as *mut F);
+        closure(&mut file, unit)
     });
-    let unit = UnitInfo::from_raw(unit.read());
-    let closure = &mut *(state as *mut W);
 
-    match closure(&mut file, unit) {
-        Continuation::Continue => chmlib_sys::CHM_ENUMERATOR_CONTINUE as c_int,
-        Continuation::Stop => chmlib_sys::CHM_ENUMERATOR_SUCCESS as c_int,
+    match result {
+        Ok(Continuation::Continue) => {
+            chmlib_sys::CHM_ENUMERATOR_CONTINUE as c_int
+        },
+        Ok(Continuation::Stop) => chmlib_sys::CHM_ENUMERATOR_SUCCESS as c_int,
+        Err(_) => chmlib_sys::CHM_ENUMERATOR_FAILURE as c_int,
     }
 }
 
@@ -125,15 +137,15 @@ impl Drop for ChmFile {
 bitflags::bitflags! {
     pub struct Filter: c_int {
         /// A normal file.
-        const NORMAL = chmlib_sys::CHM_ENUMERATE_NORMAL;
+        const NORMAL = chmlib_sys::CHM_ENUMERATE_NORMAL as c_int;
         /// A meta file (typically used by the CHM system).
-        const META = chmlib_sys::CHM_ENUMERATE_META;
+        const META = chmlib_sys::CHM_ENUMERATE_META as c_int;
         /// A special file (starts with `#` or `$`).
-        const SPECIAL = chmlib_sys::CHM_ENUMERATE_SPECIAL;
+        const SPECIAL = chmlib_sys::CHM_ENUMERATE_SPECIAL as c_int;
         /// It's a file.
-        const FILES = chmlib_sys::CHM_ENUMERATE_FILES;
+        const FILES = chmlib_sys::CHM_ENUMERATE_FILES as c_int;
         /// It's a directory.
-        const DIRS = chmlib_sys::CHM_ENUMERATE_DIRS;
+        const DIRS = chmlib_sys::CHM_ENUMERATE_DIRS as c_int;
     }
 }
 

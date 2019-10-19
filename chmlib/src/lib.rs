@@ -1,4 +1,10 @@
-use std::{ffi::CString, mem::MaybeUninit, path::Path, ptr::NonNull};
+use std::{
+    ffi::CString,
+    mem::{ManuallyDrop, MaybeUninit},
+    os::raw::{c_int, c_void},
+    path::Path,
+    ptr::NonNull,
+};
 use thiserror::Error;
 
 #[derive(Debug)]
@@ -21,7 +27,7 @@ impl ChmFile {
     }
 
     /// Find a particular object in the archive.
-    pub fn find<P: AsRef<Path>>(&self, path: P) -> Option<UnitInfo> {
+    pub fn find<P: AsRef<Path>>(&mut self, path: P) -> Option<UnitInfo> {
         let path = path_to_cstring(path.as_ref()).ok()?;
 
         unsafe {
@@ -43,6 +49,67 @@ impl ChmFile {
             }
         }
     }
+
+    pub fn for_each<F>(&mut self, filter: Filter, mut cb: F)
+    where
+        F: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
+    {
+        unsafe {
+            chmlib_sys::chm_enumerate(
+                self.raw.as_ptr(),
+                filter.bits(),
+                Some(function_wrapper::<F>),
+                &mut cb as *mut _ as *mut c_void,
+            );
+        }
+    }
+
+    pub fn for_each_item_in_dir<F, P>(
+        &mut self,
+        filter: Filter,
+        path: P,
+        mut cb: F,
+    ) where
+        P: AsRef<Path>,
+        F: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
+    {
+        let path = match path_to_cstring(path.as_ref()) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        unsafe {
+            chmlib_sys::chm_enumerate_dir(
+                self.raw.as_ptr(),
+                path.as_ptr(),
+                filter.bits(),
+                Some(function_wrapper::<F>),
+                &mut cb as *mut _ as *mut c_void,
+            );
+        }
+    }
+}
+
+unsafe extern "C" fn function_wrapper<W>(
+    file: *mut chmlib_sys::chmFile,
+    unit: *mut chmlib_sys::chmUnitInfo,
+    state: *mut c_void,
+) -> c_int
+where
+    W: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
+{
+    // Use ManuallyDrop because we want to give the caller a `&mut ChmFile` but
+    // want to make sure the destructor is never called (double-free).
+    let mut file = ManuallyDrop::new(ChmFile {
+        raw: NonNull::new_unchecked(file),
+    });
+    let unit = UnitInfo::from_raw(unit.read());
+    let closure = &mut *(state as *mut W);
+
+    match closure(&mut file, unit) {
+        Continuation::Continue => chmlib_sys::CHM_ENUMERATOR_CONTINUE as c_int,
+        Continuation::Stop => chmlib_sys::CHM_ENUMERATOR_SUCCESS as c_int,
+    }
 }
 
 impl Drop for ChmFile {
@@ -53,11 +120,38 @@ impl Drop for ChmFile {
     }
 }
 
+bitflags::bitflags! {
+    pub struct Filter: c_int {
+        /// A normal file.
+        const NORMAL = 1;
+        /// A meta file (typically used by the CHM system).
+        const META = 2;
+        /// A special file (starts with `#` or `$`).
+        const SPECIAL = 4;
+        /// It's a file.
+        const FILES = 8;
+        /// It's a directory.
+        const DIRS = 16;
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum Continuation {
+    Continue,
+    Stop,
+}
+
 #[derive(Debug)]
-pub struct UnitInfo;
+pub struct UnitInfo {
+    pub flags: Filter,
+}
 
 impl UnitInfo {
-    fn from_raw(ui: chmlib_sys::chmUnitInfo) -> UnitInfo { UnitInfo }
+    fn from_raw(ui: chmlib_sys::chmUnitInfo) -> UnitInfo {
+        UnitInfo {
+            flags: Filter::from_bits_truncate(ui.flags),
+        }
+    }
 }
 
 #[derive(Error, Debug, Copy, Clone, PartialEq)]
@@ -115,9 +209,47 @@ mod tests {
     #[test]
     fn find_an_item_in_the_sample() {
         let sample = sample_path();
-        let chm = ChmFile::open(&sample).unwrap();
+        let mut chm = ChmFile::open(&sample).unwrap();
 
         assert!(chm.find("/BrowserView.html").is_some());
         assert!(chm.find("doesn't exist.txt").is_none());
+    }
+
+    #[test]
+    fn iterate_over_items() {
+        let sample = sample_path();
+        let mut chm = ChmFile::open(&sample).unwrap();
+
+        let mut normal = 0;
+        let mut special = 0;
+        let mut meta = 0;
+        let mut files = 0;
+        let mut dirs = 0;
+
+        chm.for_each(Filter::all(), |_chm, unit| {
+            if unit.flags.contains(Filter::NORMAL) {
+                normal += 1
+            }
+            if unit.flags.contains(Filter::SPECIAL) {
+                special += 1
+            }
+            if unit.flags.contains(Filter::META) {
+                meta += 1
+            }
+            if unit.flags.contains(Filter::FILES) {
+                files += 1
+            }
+            if unit.flags.contains(Filter::DIRS) {
+                dirs += 1
+            }
+
+            Continuation::Continue
+        });
+
+        assert_eq!(normal, 199);
+        assert_eq!(special, 18);
+        assert_eq!(meta, 7);
+        assert_eq!(files, 179);
+        assert_eq!(dirs, 45);
     }
 }

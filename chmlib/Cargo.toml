@@ -9,4 +9,5 @@ repository = "https://github.com/Michael-F-Bryan/chmlib"
 
 [dependencies]
 chmlib-sys = { path = "../chmlib-sys" }
-thiserror = "1.0.2"
+thiserror = "1.0"
+bitflags = "1.0"

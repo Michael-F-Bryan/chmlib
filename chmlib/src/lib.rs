@@ -1,5 +1,6 @@
 use std::{
     ffi::CString,
+    fmt::{self, Debug, Formatter},
     mem::{ManuallyDrop, MaybeUninit},
     os::raw::{c_int, c_void},
     path::Path,
@@ -99,7 +100,8 @@ where
     W: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
 {
     // Use ManuallyDrop because we want to give the caller a `&mut ChmFile` but
-    // want to make sure the destructor is never called (double-free).
+    // want to make sure the destructor is never called (to prevent
+    // double-frees).
     let mut file = ManuallyDrop::new(ChmFile {
         raw: NonNull::new_unchecked(file),
     });
@@ -123,15 +125,15 @@ impl Drop for ChmFile {
 bitflags::bitflags! {
     pub struct Filter: c_int {
         /// A normal file.
-        const NORMAL = 1;
+        const NORMAL = chmlib_sys::CHM_ENUMERATE_NORMAL;
         /// A meta file (typically used by the CHM system).
-        const META = 2;
+        const META = chmlib_sys::CHM_ENUMERATE_META;
         /// A special file (starts with `#` or `$`).
-        const SPECIAL = 4;
+        const SPECIAL = chmlib_sys::CHM_ENUMERATE_SPECIAL;
         /// It's a file.
-        const FILES = 8;
+        const FILES = chmlib_sys::CHM_ENUMERATE_FILES;
         /// It's a directory.
-        const DIRS = 16;
+        const DIRS = chmlib_sys::CHM_ENUMERATE_DIRS;
     }
 }
 
@@ -141,16 +143,57 @@ pub enum Continuation {
     Stop,
 }
 
-#[derive(Debug)]
 pub struct UnitInfo {
+    pub start: u64,
+    pub length: u64,
     pub flags: Filter,
+    path: [i8; 513],
 }
 
 impl UnitInfo {
     fn from_raw(ui: chmlib_sys::chmUnitInfo) -> UnitInfo {
+        let flags = Filter::from_bits_truncate(ui.flags);
+        let chmlib_sys::chmUnitInfo {
+            start,
+            length,
+            path,
+            ..
+        } = ui;
+
         UnitInfo {
-            flags: Filter::from_bits_truncate(ui.flags),
+            flags,
+            start,
+            length,
+            path,
         }
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        let end = self
+            .path
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(self.path.len());
+
+        // we need to cast from c_char* to u8*
+        let path = unsafe {
+            std::slice::from_raw_parts(self.path.as_ptr() as *const u8, end)
+        };
+
+        std::str::from_utf8(path).map(Path::new).ok()
+    }
+}
+
+impl Debug for UnitInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let path = self.path().unwrap_or(Path::new(""));
+
+        f.debug_struct("UnitInfo")
+            .field("start", &self.start)
+            .field("length", &self.length)
+            .field("flags", &self.flags)
+            .field("path", &path)
+            .finish()
     }
 }
 

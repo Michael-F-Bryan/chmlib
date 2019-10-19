@@ -1,0 +1,3 @@
+[submodule "vendor/CHMLib"]
+	path = vendor/CHMLib
+	url = git@github.com:jedwing/CHMLib.git

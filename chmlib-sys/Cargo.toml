@@ -3,7 +3,13 @@ name = "chmlib-sys"
 version = "0.1.0"
 authors = ["Michael Bryan <michaelfbryan@gmail.com>"]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+links = "chmlib"
+description = "Raw bindings to the CHMLib C library"
+license = "LGPL"
+repository = "https://github.com/Michael-F-Bryan/chmlib"
+build = "build.rs"
 
 [dependencies]
+
+[build-dependencies]
+cc = { version = "1.0" }

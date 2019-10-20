@@ -92,6 +92,31 @@ impl ChmFile {
             );
         }
     }
+
+    pub fn read(
+        &mut self,
+        unit: &UnitInfo,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> Result<usize, ReadError> {
+        let mut unit = unit.0.clone();
+
+        let bytes_written = unsafe {
+            chmlib_sys::chm_retrieve_object(
+                self.raw.as_ptr(),
+                &mut unit,
+                buffer.as_mut_ptr(),
+                offset,
+                buffer.len() as _,
+            )
+        };
+
+        if bytes_written >= 0 {
+            Ok(bytes_written as usize)
+        } else {
+            Err(ReadError)
+        }
+    }
 }
 
 unsafe extern "C" fn function_wrapper<F>(
@@ -155,41 +180,44 @@ pub enum Continuation {
     Stop,
 }
 
-pub struct UnitInfo {
-    pub start: u64,
-    pub length: u64,
-    pub flags: Filter,
-    path: [i8; 513],
-}
+#[repr(transparent)]
+pub struct UnitInfo(chmlib_sys::chmUnitInfo);
 
 impl UnitInfo {
-    fn from_raw(ui: chmlib_sys::chmUnitInfo) -> UnitInfo {
-        let flags = Filter::from_bits_truncate(ui.flags);
-        let chmlib_sys::chmUnitInfo {
-            start,
-            length,
-            path,
-            ..
-        } = ui;
+    fn from_raw(ui: chmlib_sys::chmUnitInfo) -> UnitInfo { UnitInfo(ui) }
 
-        UnitInfo {
-            flags,
-            start,
-            length,
-            path,
-        }
-    }
+    fn flags(&self) -> Filter { Filter::from_bits_truncate(self.0.flags) }
 
+    pub fn is_normal(&self) -> bool { self.flags().contains(Filter::NORMAL) }
+
+    pub fn is_special(&self) -> bool { self.flags().contains(Filter::SPECIAL) }
+
+    pub fn is_meta(&self) -> bool { self.flags().contains(Filter::META) }
+
+    pub fn is_file(&self) -> bool { self.flags().contains(Filter::FILES) }
+
+    pub fn is_dir(&self) -> bool { self.flags().contains(Filter::DIRS) }
+
+    pub fn space(&self) -> c_int { self.0.space }
+
+    /// The starting position within the underlying file.
+    pub fn start(&self) -> u64 { self.0.start }
+
+    /// The number of bytes in this item.
+    pub fn length(&self) -> u64 { self.0.length }
+
+    /// The item's filename.
     pub fn path(&self) -> Option<&Path> {
         let end = self
+            .0
             .path
             .iter()
             .position(|b| *b == 0)
-            .unwrap_or(self.path.len());
+            .unwrap_or(self.0.path.len());
 
         // we need to cast from c_char* to u8*
         let path = unsafe {
-            std::slice::from_raw_parts(self.path.as_ptr() as *const u8, end)
+            std::slice::from_raw_parts(self.0.path.as_ptr() as *const u8, end)
         };
 
         std::str::from_utf8(path).map(Path::new).ok()
@@ -201,9 +229,10 @@ impl Debug for UnitInfo {
         let path = self.path().unwrap_or(Path::new(""));
 
         f.debug_struct("UnitInfo")
-            .field("start", &self.start)
-            .field("length", &self.length)
-            .field("flags", &self.flags)
+            .field("start", &self.0.start)
+            .field("length", &self.0.length)
+            .field("flags", &self.0.flags)
+            .field("space", &self.0.space)
             .field("path", &path)
             .finish()
     }
@@ -212,6 +241,10 @@ impl Debug for UnitInfo {
 #[derive(Error, Debug, Copy, Clone, PartialEq)]
 #[error("Invalid Path")]
 pub struct InvalidPath;
+
+#[derive(Error, Debug, Copy, Clone, PartialEq)]
+#[error("The read failed")]
+pub struct ReadError;
 
 /// The error returned when we are unable to open a [`ChmFile`].
 #[derive(Error, Debug, Copy, Clone, PartialEq)]
@@ -282,19 +315,19 @@ mod tests {
         let mut dirs = 0;
 
         chm.for_each(Filter::all(), |_chm, unit| {
-            if unit.flags.contains(Filter::NORMAL) {
+            if unit.flags().contains(Filter::NORMAL) {
                 normal += 1
             }
-            if unit.flags.contains(Filter::SPECIAL) {
+            if unit.flags().contains(Filter::SPECIAL) {
                 special += 1
             }
-            if unit.flags.contains(Filter::META) {
+            if unit.flags().contains(Filter::META) {
                 meta += 1
             }
-            if unit.flags.contains(Filter::FILES) {
+            if unit.flags().contains(Filter::FILES) {
                 files += 1
             }
-            if unit.flags.contains(Filter::DIRS) {
+            if unit.flags().contains(Filter::DIRS) {
                 dirs += 1
             }
 
@@ -306,5 +339,28 @@ mod tests {
         assert_eq!(meta, 7);
         assert_eq!(files, 179);
         assert_eq!(dirs, 45);
+    }
+
+    #[test]
+    fn read_an_item() {
+        let sample = sample_path();
+        let mut chm = ChmFile::open(&sample).unwrap();
+        let filename = "/template/packages/core-web/css/index.responsive.css";
+
+        // look for a known file
+        let item = chm.find(filename).unwrap();
+
+        // then read it into a buffer
+        let mut buffer = vec![0; item.length() as usize];
+        let bytes_written = chm.read(&item, 0, &mut buffer).unwrap();
+
+        // we should have read everything
+        assert_eq!(bytes_written, item.length() as usize);
+
+        // ... and got what we expected
+        let got = String::from_utf8(buffer).unwrap();
+        assert!(got.starts_with(
+            "html, body, div#i-index-container, div#i-index-body"
+        ));
     }
 }

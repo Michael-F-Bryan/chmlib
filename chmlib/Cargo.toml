@@ -4,8 +4,10 @@ version = "0.1.0"
 authors = ["Michael Bryan <michaelfbryan@gmail.com>"]
 edition = "2018"
 description = "A library for reading Microsoft HTML Help Files (.chm)"
-license = "LGPL"
 repository = "https://github.com/Michael-F-Bryan/chmlib"
+license = "LGPL-2.1-or-later"
+categories = ["api-bindings", "parser-implementations"]
+keywords = ["CHM", "help", "chmlib"]
 
 [dependencies]
 chmlib-sys = { path = "../chmlib-sys" }

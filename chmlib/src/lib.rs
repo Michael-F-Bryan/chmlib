@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     error::Error,
     ffi::CString,
     fmt::{self, Debug, Formatter},
@@ -133,7 +134,9 @@ fn handle_enumeration_result<F>(
     state: WrapperState<F>,
     ret: c_int,
 ) -> Result<(), EnumerationError> {
-    if let Some(err) = state.error {
+    if let Some(panic) = state.panic {
+        panic::resume_unwind(panic)
+    } else if let Some(err) = state.error {
         Err(EnumerationError::User(err))
     } else if ret < 0 {
         Err(EnumerationError::Internal)
@@ -145,6 +148,7 @@ fn handle_enumeration_result<F>(
 struct WrapperState<F> {
     closure: F,
     error: Option<Box<dyn Error + 'static>>,
+    panic: Option<Box<dyn Any + Send + 'static>>,
 }
 
 impl<F> WrapperState<F> {
@@ -152,6 +156,7 @@ impl<F> WrapperState<F> {
         WrapperState {
             closure,
             error: None,
+            panic: None,
         }
     }
 }
@@ -191,7 +196,10 @@ where
             chmlib_sys::CHM_ENUMERATOR_FAILURE as c_int
         },
         Ok(Continuation::Stop) => chmlib_sys::CHM_ENUMERATOR_SUCCESS as c_int,
-        Err(_) => chmlib_sys::CHM_ENUMERATOR_FAILURE as c_int,
+        Err(panic) => {
+            state.panic = Some(panic);
+            chmlib_sys::CHM_ENUMERATOR_FAILURE as c_int
+        },
     }
 }
 
@@ -466,5 +474,15 @@ mod tests {
             },
             _ => panic!("Unexpected error: {}", got_err),
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "Oops...")]
+    fn panics_are_propagated() {
+        let sample = sample_path();
+        let mut chm = ChmFile::open(&sample).unwrap();
+
+        chm.for_each(Filter::all(), |_, _| panic!("Oops..."))
+            .unwrap();
     }
 }

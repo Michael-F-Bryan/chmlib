@@ -16,7 +16,8 @@ fn main() {
     file.for_each(Filter::all(), |_file, item| {
         describe_item(item);
         Continuation::Continue
-    });
+    })
+    .unwrap();
 }
 
 fn describe_item(item: UnitInfo) {

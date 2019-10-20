@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     ffi::CString,
     fmt::{self, Debug, Formatter},
     mem::{ManuallyDrop, MaybeUninit},
@@ -53,43 +54,52 @@ impl ChmFile {
     }
 
     /// Inspect each item within the [`ChmFile`].
-    pub fn for_each<F>(&mut self, filter: Filter, mut cb: F)
+    pub fn for_each<F, C>(
+        &mut self,
+        filter: Filter,
+        cb: F,
+    ) -> Result<(), EnumerationError>
     where
-        F: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
+        F: FnMut(&mut ChmFile, UnitInfo) -> C,
+        C: Into<Continuation>,
     {
         unsafe {
-            chmlib_sys::chm_enumerate(
+            let mut state = WrapperState::new(cb);
+            let ret = chmlib_sys::chm_enumerate(
                 self.raw.as_ptr(),
                 filter.bits(),
-                Some(function_wrapper::<F>),
-                &mut cb as *mut _ as *mut c_void,
+                Some(function_wrapper::<F, C>),
+                &mut state as *mut _ as *mut c_void,
             );
+            handle_enumeration_result(state, ret)
         }
     }
 
     /// Inspect each item within the [`ChmFile`] inside a specified directory.
-    pub fn for_each_item_in_dir<F, P>(
+    pub fn for_each_item_in_dir<F, C, P>(
         &mut self,
         filter: Filter,
         prefix: P,
-        mut cb: F,
-    ) where
+        cb: F,
+    ) -> Result<(), EnumerationError>
+    where
         P: AsRef<Path>,
-        F: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
+        F: FnMut(&mut ChmFile, UnitInfo) -> C,
+        C: Into<Continuation>,
     {
-        let path = match path_to_cstring(prefix.as_ref()) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
+        let path = path_to_cstring(prefix.as_ref())
+            .map_err(EnumerationError::InvalidPrefix)?;
 
         unsafe {
-            chmlib_sys::chm_enumerate_dir(
+            let mut state = WrapperState::new(cb);
+            let ret = chmlib_sys::chm_enumerate_dir(
                 self.raw.as_ptr(),
                 path.as_ptr(),
                 filter.bits(),
-                Some(function_wrapper::<F>),
-                &mut cb as *mut _ as *mut c_void,
+                Some(function_wrapper::<F, C>),
+                &mut state as *mut _ as *mut c_void,
             );
+            handle_enumeration_result(state, ret)
         }
     }
 
@@ -119,13 +129,41 @@ impl ChmFile {
     }
 }
 
-unsafe extern "C" fn function_wrapper<F>(
+fn handle_enumeration_result<F>(
+    state: WrapperState<F>,
+    ret: c_int,
+) -> Result<(), EnumerationError> {
+    if let Some(err) = state.error {
+        Err(EnumerationError::User(err))
+    } else if ret < 0 {
+        Err(EnumerationError::Internal)
+    } else {
+        Ok(())
+    }
+}
+
+struct WrapperState<F> {
+    closure: F,
+    error: Option<Box<dyn Error + 'static>>,
+}
+
+impl<F> WrapperState<F> {
+    fn new(closure: F) -> WrapperState<F> {
+        WrapperState {
+            closure,
+            error: None,
+        }
+    }
+}
+
+unsafe extern "C" fn function_wrapper<F, C>(
     file: *mut chmlib_sys::chmFile,
     unit: *mut chmlib_sys::chmUnitInfo,
     state: *mut c_void,
 ) -> c_int
 where
-    F: FnMut(&mut ChmFile, UnitInfo) -> Continuation,
+    F: FnMut(&mut ChmFile, UnitInfo) -> C,
+    C: Into<Continuation>,
 {
     // we need to make sure panics can't escape across the FFI boundary.
     let result = panic::catch_unwind(|| {
@@ -138,13 +176,19 @@ where
         let unit = UnitInfo::from_raw(unit.read());
         // the opaque state pointer is guaranteed to point to an instance of our
         // closure
-        let closure = &mut *(state as *mut F);
-        closure(&mut file, unit)
+        let state = &mut *(state as *mut WrapperState<F>);
+        (state.closure)(&mut file, unit)
     });
 
-    match result {
+    let mut state = &mut *(state as *mut WrapperState<F>);
+
+    match result.map(Into::into) {
         Ok(Continuation::Continue) => {
             chmlib_sys::CHM_ENUMERATOR_CONTINUE as c_int
+        },
+        Ok(Continuation::Failure(err)) => {
+            state.error = Some(err);
+            chmlib_sys::CHM_ENUMERATOR_FAILURE as c_int
         },
         Ok(Continuation::Stop) => chmlib_sys::CHM_ENUMERATOR_SUCCESS as c_int,
         Err(_) => chmlib_sys::CHM_ENUMERATOR_FAILURE as c_int,
@@ -174,10 +218,27 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Continuation {
+    /// Continue iterating over items.
     Continue,
+    /// Stop iterating and bail with an error.
+    Failure(Box<dyn Error + 'static>),
+    /// Stop iterating without returning an error (e.g. iteration finished
+    /// successfully).
     Stop,
+}
+
+impl From<()> for Continuation {
+    fn from(_: ()) -> Continuation { Continuation::Continue }
+}
+
+impl<E: Into<Box<dyn Error + 'static>>> From<Result<(), E>> for Continuation {
+    fn from(other: Result<(), E>) -> Continuation {
+        match other {
+            Ok(_) => Continuation::Continue,
+            Err(e) => Continuation::Failure(e.into()),
+        }
+    }
 }
 
 #[repr(transparent)]
@@ -247,6 +308,17 @@ impl Debug for UnitInfo {
 #[derive(Error, Debug, Copy, Clone, PartialEq)]
 #[error("Invalid Path")]
 pub struct InvalidPath;
+
+#[derive(Error, Debug)]
+pub enum EnumerationError {
+    /// A user-provided error.
+    #[error("An error was encountered while iterating")]
+    User(#[source] Box<dyn Error + 'static>),
+    #[error("The prefix was invalid")]
+    InvalidPrefix(#[source] InvalidPath),
+    #[error("CHMLib returned an error")]
+    Internal,
+}
 
 #[derive(Error, Debug, Copy, Clone, PartialEq)]
 #[error("The read failed")]
@@ -338,7 +410,8 @@ mod tests {
             }
 
             Continuation::Continue
-        });
+        })
+        .unwrap();
 
         assert_eq!(normal, 199);
         assert_eq!(special, 18);
@@ -368,5 +441,30 @@ mod tests {
         assert!(got.starts_with(
             "html, body, div#i-index-container, div#i-index-body"
         ));
+    }
+
+    #[test]
+    fn continuation_with_unit() {
+        let sample = sample_path();
+        let mut chm = ChmFile::open(&sample).unwrap();
+
+        chm.for_each(Filter::all(), |_, _| {}).unwrap();
+    }
+
+    #[test]
+    fn continuation_with_result() {
+        let sample = sample_path();
+        let mut chm = ChmFile::open(&sample).unwrap();
+
+        let got_err = chm
+            .for_each(Filter::all(), |_, _| Err(InvalidPath))
+            .unwrap_err();
+
+        match got_err {
+            EnumerationError::User(err) => {
+                assert!(err.downcast_ref::<InvalidPath>().is_some())
+            },
+            _ => panic!("Unexpected error: {}", got_err),
+        }
     }
 }

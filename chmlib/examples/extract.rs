@@ -1,4 +1,4 @@
-use chmlib::{ChmFile, Continuation, Filter, UnitInfo};
+use chmlib::{ChmFile, Filter, UnitInfo};
 use std::{
     env,
     error::Error,
@@ -18,15 +18,8 @@ fn main() {
 
     let out_dir = PathBuf::from(&args[1]);
 
-    file.for_each(Filter::all(), |file, item| {
-        match extract(&out_dir, file, &item) {
-            Ok(_) => Continuation::Continue,
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                Continuation::Stop
-            },
-        }
-    });
+    file.for_each(Filter::all(), |file, item| extract(&out_dir, file, &item))
+        .unwrap();
 }
 
 fn extract(

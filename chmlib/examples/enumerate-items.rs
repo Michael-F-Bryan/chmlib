@@ -36,6 +36,10 @@ fn describe_item(item: UnitInfo) {
         description.push_str("file");
     }
 
+    if item.length() % 7 == 0 {
+        description.push_str("🦀");
+    }
+
     println!(
         "   {} {:8} {:8}   {}\t\t{}",
         item.space(),

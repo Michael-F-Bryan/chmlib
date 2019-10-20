@@ -207,6 +207,12 @@ impl UnitInfo {
     pub fn length(&self) -> u64 { self.0.length }
 
     /// The item's filename.
+    ///
+    /// # Security
+    ///
+    /// This path is provided by the original CHM file's author. It is the
+    /// caller's responsibility to handle malicious input (e.g.
+    /// `/../../../etc/passwd`).
     pub fn path(&self) -> Option<&Path> {
         let end = self
             .0

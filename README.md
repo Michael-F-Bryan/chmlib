@@ -12,4 +12,4 @@ I've documented the process of binding to this library in the form of a
 This project is licensed using LGPL v2.1. See [LICENSE](LICENSE.md) for more.
 
 [upstream]: https://github.com/jedwing/CHMLib/
-[post]: http://adventures.michaelfbryan.com/posts/binding-to-a-c-library/
+[post]: http://adventures.michaelfbryan.com/posts/how-not-to-riir/

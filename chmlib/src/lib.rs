@@ -134,31 +134,27 @@ fn handle_enumeration_result<F>(
     state: WrapperState<F>,
     ret: c_int,
 ) -> Result<(), EnumerationError> {
-    if let Some(panic) = state.panic {
-        panic::resume_unwind(panic)
-    } else if let Some(err) = state.error {
-        Err(EnumerationError::User(err))
-    } else if ret < 0 {
-        Err(EnumerationError::Internal)
-    } else {
-        Ok(())
+    match state {
+        WrapperState::Panic(panic) => panic::resume_unwind(panic),
+        WrapperState::Error(err) => Err(EnumerationError::User(err)),
+        _ => {
+            if ret < 0 {
+                Err(EnumerationError::Internal)
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
-struct WrapperState<F> {
-    closure: F,
-    error: Option<Box<dyn Error + 'static>>,
-    panic: Option<Box<dyn Any + Send + 'static>>,
+enum WrapperState<F> {
+    Closure(F),
+    Error(Box<dyn Error + 'static>),
+    Panic(Box<dyn Any + Send + 'static>),
 }
 
 impl<F> WrapperState<F> {
-    fn new(closure: F) -> WrapperState<F> {
-        WrapperState {
-            closure,
-            error: None,
-            panic: None,
-        }
-    }
+    fn new(closure: F) -> WrapperState<F> { WrapperState::Closure(closure) }
 }
 
 unsafe extern "C" fn function_wrapper<F, C>(
@@ -172,32 +168,37 @@ where
 {
     // we need to make sure panics can't escape across the FFI boundary.
     let result = panic::catch_unwind(|| {
-        // Use ManuallyDrop because we want to give the caller a `&mut ChmFile`
-        // but want to make sure the destructor is never called (to
-        // prevent double-frees).
-        let mut file = ManuallyDrop::new(ChmFile {
-            raw: NonNull::new_unchecked(file),
-        });
-        let unit = UnitInfo::from_raw(unit.read());
-        // the opaque state pointer is guaranteed to point to an instance of our
-        // closure
         let state = &mut *(state as *mut WrapperState<F>);
-        (state.closure)(&mut file, unit)
+
+        if let WrapperState::Closure(closure) = state {
+            // Use ManuallyDrop because we want to give the caller a `&mut ChmFile`
+            // but want to make sure the destructor is never called (to
+            // prevent double-frees).
+            let mut file = ManuallyDrop::new(ChmFile {
+                raw: NonNull::new_unchecked(file),
+            });
+            let unit = UnitInfo::from_raw(unit.read());
+            closure(&mut file, unit)
+        } else {
+            // if we once signaled failure, the callback shouldn't be reused
+            use std::hint::unreachable_unchecked;
+            unreachable_unchecked()
+        }
     });
 
-    let mut state = &mut *(state as *mut WrapperState<F>);
+    let state = &mut *(state as *mut WrapperState<F>);
 
     match result.map(Into::into) {
         Ok(Continuation::Continue) => {
             chmlib_sys::CHM_ENUMERATOR_CONTINUE as c_int
         },
         Ok(Continuation::Failure(err)) => {
-            state.error = Some(err);
+            *state = WrapperState::Error(err);
             chmlib_sys::CHM_ENUMERATOR_FAILURE as c_int
         },
         Ok(Continuation::Stop) => chmlib_sys::CHM_ENUMERATOR_SUCCESS as c_int,
         Err(panic) => {
-            state.panic = Some(panic);
+            *state = WrapperState::Panic(panic);
             chmlib_sys::CHM_ENUMERATOR_FAILURE as c_int
         },
     }
